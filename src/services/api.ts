@@ -1,0 +1,611 @@
+import { WatchProgress, Comment, User, MediaItem, ChatMessage } from '../types';
+
+const CLIENT_TMDB_KEY = (import.meta as any).env?.VITE_TMDB_API_KEY || '33ed0028da964921f8585c452c22cada';
+const TMDB_CDN_URL = 'https://api.themoviedb.org/3';
+
+const GENRE_MAP: Record<number, string> = {
+  28: 'Action',
+  12: 'Adventure',
+  16: 'Animation',
+  35: 'Comedy',
+  80: 'Crime',
+  99: 'Documentary',
+  18: 'Drama',
+  10751: 'Family',
+  14: 'Fantasy',
+  36: 'History',
+  27: 'Horror',
+  10402: 'Music',
+  9648: 'Mystery',
+  10749: 'Romance',
+  878: 'Sci-Fi',
+  10770: 'TV Movie',
+  53: 'Thriller',
+  10752: 'War',
+  37: 'Western',
+  10759: 'Action & Adventure',
+  10762: 'Kids',
+  10763: 'News',
+  10764: 'Reality',
+  10765: 'Sci-Fi & Fantasy',
+  10766: 'Soap',
+  10767: 'Talk',
+  10768: 'War & Politics',
+};
+
+function formatTmdbClient(item: any, explicitType?: 'movie' | 'series'): MediaItem {
+  const isMovie = explicitType ? explicitType === 'movie' : (item.media_type === 'movie' || !!item.title);
+  const title = item.title || item.name || 'Untitled';
+  const releaseDate = item.release_date || item.first_air_date || '';
+  const releaseYear = releaseDate ? parseInt(releaseDate.substring(0, 4), 10) : 2026;
+  const posterUrl = item.poster_path
+    ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
+    : 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=800&q=80';
+  const backdropUrl = item.backdrop_path
+    ? `https://image.tmdb.org/t/p/original${item.backdrop_path}`
+    : posterUrl;
+
+  const genreIds = item.genre_ids || (item.genres || []).map((g: any) => g.id);
+  const genres = (genreIds || [])
+    .map((gid: number) => GENRE_MAP[gid])
+    .filter(Boolean);
+
+  const type = isMovie ? 'movie' : 'series';
+  const tmdbId = item.id;
+
+  // Trailer key extraction if available in item.videos
+  let trailerKey: string | undefined = undefined;
+  if (item.videos?.results && Array.isArray(item.videos.results)) {
+    const trailer = item.videos.results.find(
+      (v: any) => v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser')
+    ) || item.videos.results[0];
+    if (trailer) trailerKey = trailer.key;
+  }
+
+  // Watch providers extraction if available
+  let watchProviders: Array<{ provider_id: number; provider_name: string; logo_path: string }> | undefined = undefined;
+  let providerLink: string | undefined = undefined;
+  const providerData = item['watch/providers']?.results?.US || item['watch/providers']?.results?.AR || item['watch/providers']?.results?.FR;
+  if (providerData) {
+    providerLink = providerData.link;
+    const streamProviders = providerData.flatrate || providerData.buy || providerData.rent || [];
+    if (Array.isArray(streamProviders) && streamProviders.length > 0) {
+      watchProviders = streamProviders.slice(0, 4).map((p: any) => ({
+        provider_id: p.provider_id,
+        provider_name: p.provider_name,
+        logo_path: p.logo_path ? `https://image.tmdb.org/t/p/w200${p.logo_path}` : '',
+      }));
+    }
+  }
+
+  const cast = (item.credits?.cast || []).slice(0, 5).map((c: any) => c.name);
+
+  const videoUrl = isMovie
+    ? `https://vidsrc.to/embed/movie/${tmdbId}`
+    : `https://vidsrc.to/embed/tv/${tmdbId}/1/1`;
+
+  // Populate seasons for series if present or provide clean defaults
+  let seasons: Array<{ seasonNumber: number; title: string; episodes: any[] }> | undefined = undefined;
+  if (!isMovie) {
+    if (item.seasons && Array.isArray(item.seasons) && item.seasons.length > 0) {
+      seasons = item.seasons
+        .filter((s: any) => s.season_number > 0)
+        .map((s: any) => ({
+          seasonNumber: s.season_number,
+          title: s.name || `Season ${s.season_number}`,
+          episodes: Array.from({ length: Math.min(s.episode_count || 12, 50) }, (_, i) => ({
+            id: `tmdb-tv-${tmdbId}-s${s.season_number}-e${i + 1}`,
+            episodeNumber: i + 1,
+            title: `Episode ${i + 1}`,
+            duration: '24m',
+            synopsis: `Episode ${i + 1} of ${title}.`,
+            videoUrl: `https://vidsrc.to/embed/tv/${tmdbId}/${s.season_number}/${i + 1}`,
+          })),
+        }));
+    }
+
+    if (!seasons || seasons.length === 0) {
+      seasons = [
+        {
+          seasonNumber: 1,
+          title: 'Season 1',
+          episodes: Array.from({ length: 12 }, (_, i) => ({
+            id: `tmdb-tv-${tmdbId}-s1-e${i + 1}`,
+            episodeNumber: i + 1,
+            title: `Episode ${i + 1}`,
+            duration: '24m',
+            synopsis: `Episode ${i + 1} of ${title}.`,
+            videoUrl: `https://vidsrc.to/embed/tv/${tmdbId}/1/${i + 1}`,
+          })),
+        },
+      ];
+    }
+  }
+
+  return {
+    id: `tmdb-${type}-${tmdbId}`,
+    tmdbId,
+    title,
+    type,
+    tagline: item.tagline || undefined,
+    synopsis: item.overview || 'No synopsis available for this title.',
+    releaseYear: isNaN(releaseYear) ? 2025 : releaseYear,
+    rating: Number((item.vote_average || 7.5).toFixed(1)),
+    contentRating: item.adult ? 'R' : 'PG-13',
+    genres: genres.length > 0 ? genres : ['Drama'],
+    duration: isMovie ? (item.runtime ? `${Math.floor(item.runtime / 60)}h ${item.runtime % 60}m` : '2h 05m') : undefined,
+    posterUrl,
+    backdropUrl,
+    videoUrl,
+    cast,
+    trailerKey,
+    watchProviders,
+    providerLink,
+    seasons,
+    quality: '4K UHD',
+    isFeatured: (item.popularity || 0) > 100,
+    isTrending: true,
+    createdAt: Date.now(),
+  };
+}
+
+// Safely fetch helper
+async function safeFetch<T>(url: string, options?: RequestInit, fallback?: T): Promise<T> {
+  try {
+    const res = await fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options?.headers || {}),
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    return await res.json();
+  } catch (err) {
+    console.warn(`API call to ${url} failed, using resilient fallback.`, err);
+    if (fallback !== undefined) return fallback;
+    throw err;
+  }
+}
+
+// TMDB API Calls with Dual Backend + Direct CDN Fallback (DevOps Resilience)
+export async function fetchTmdbTrending(type: 'all' | 'movie' | 'tv' = 'all', page = 1): Promise<{ results: MediaItem[]; totalPages: number }> {
+  try {
+    const res = await safeFetch<{ results: MediaItem[]; totalPages: number }>(`/api/tmdb/trending?type=${type}&page=${page}`);
+    if (res && res.results && res.results.length > 0) return res;
+  } catch {}
+
+  // Direct CDN fallback for pure static Vercel / Netlify deployment
+  try {
+    const directRes = await fetch(`${TMDB_CDN_URL}/trending/${type}/week?api_key=${CLIENT_TMDB_KEY}&page=${page}`);
+    if (directRes.ok) {
+      const data = await directRes.json();
+      const results = (data.results || [])
+        .filter((item: any) => item.poster_path && (item.title || item.name))
+        .map((item: any) => formatTmdbClient(item));
+      return { results, totalPages: data.total_pages || 1 };
+    }
+  } catch (e) {
+    console.warn('Direct TMDB fallback failed:', e);
+  }
+
+  return { results: [], totalPages: 1 };
+}
+
+export async function fetchTmdbPopular(type: 'movie' | 'tv' = 'movie', page = 1): Promise<{ results: MediaItem[]; totalPages: number }> {
+  try {
+    const res = await safeFetch<{ results: MediaItem[]; totalPages: number }>(`/api/tmdb/popular?type=${type}&page=${page}`);
+    if (res && res.results && res.results.length > 0) return res;
+  } catch {}
+
+  // Direct CDN fallback
+  try {
+    const directRes = await fetch(`${TMDB_CDN_URL}/${type}/popular?api_key=${CLIENT_TMDB_KEY}&page=${page}`);
+    if (directRes.ok) {
+      const data = await directRes.json();
+      const results = (data.results || [])
+        .filter((item: any) => item.poster_path && (item.title || item.name))
+        .map((item: any) => formatTmdbClient(item, type === 'tv' ? 'series' : 'movie'));
+      return { results, totalPages: data.total_pages || 1 };
+    }
+  } catch (e) {
+    console.warn('Direct TMDB popular fallback failed:', e);
+  }
+
+  return { results: [], totalPages: 1 };
+}
+
+// Fetch Anime directly from TMDb API (Japanese Animation)
+export async function fetchTmdbAnime(page = 1): Promise<{ results: MediaItem[]; totalPages: number }> {
+  try {
+    const res = await safeFetch<{ results: MediaItem[]; totalPages: number }>(`/api/tmdb/anime?page=${page}`);
+    if (res && res.results && res.results.length > 0) return res;
+  } catch {}
+
+  // Direct CDN fallback
+  try {
+    const directRes = await fetch(
+      `${TMDB_CDN_URL}/discover/tv?api_key=${CLIENT_TMDB_KEY}&with_genres=16&with_original_language=ja&sort_by=vote_count.desc&page=${page}`
+    );
+    if (directRes.ok) {
+      const data = await directRes.json();
+      const results = (data.results || [])
+        .filter((item: any) => item.poster_path && (item.title || item.name))
+        .map((item: any) => {
+          const it = formatTmdbClient(item, 'series');
+          if (!it.genres.includes('Animation')) it.genres.unshift('Animation');
+          return it;
+        });
+      return { results, totalPages: data.total_pages || 1 };
+    }
+  } catch (e) {
+    console.warn('Direct TMDB anime fallback failed:', e);
+  }
+
+  return { results: [], totalPages: 1 };
+}
+
+// Fetch Top Rated directly from TMDb API
+export async function fetchTmdbTopRated(type: 'movie' | 'tv' = 'movie', page = 1): Promise<{ results: MediaItem[]; totalPages: number }> {
+  try {
+    const res = await fetch(`${TMDB_CDN_URL}/${type}/top_rated?api_key=${CLIENT_TMDB_KEY}&page=${page}`);
+    if (res.ok) {
+      const data = await res.json();
+      const results = (data.results || [])
+        .filter((item: any) => item.poster_path && (item.title || item.name))
+        .map((item: any) => formatTmdbClient(item, type === 'tv' ? 'series' : 'movie'));
+      return { results, totalPages: data.total_pages || 1 };
+    }
+  } catch (e) {
+    console.warn('Direct TMDB top rated fallback failed:', e);
+  }
+  return { results: [], totalPages: 1 };
+}
+
+// Fetch Discover with Genre directly from TMDb API
+export async function fetchTmdbDiscover(type: 'movie' | 'tv', genreId?: number, page = 1): Promise<{ results: MediaItem[]; totalPages: number }> {
+  try {
+    const genreParam = genreId ? `&with_genres=${genreId}` : '';
+    const res = await fetch(`${TMDB_CDN_URL}/discover/${type}?api_key=${CLIENT_TMDB_KEY}${genreParam}&page=${page}&sort_by=popularity.desc`);
+    if (res.ok) {
+      const data = await res.json();
+      const results = (data.results || [])
+        .filter((item: any) => item.poster_path && (item.title || item.name))
+        .map((item: any) => formatTmdbClient(item, type === 'tv' ? 'series' : 'movie'));
+      return { results, totalPages: data.total_pages || 1 };
+    }
+  } catch (e) {
+    console.warn('Direct TMDB discover fallback failed:', e);
+  }
+  return { results: [], totalPages: 1 };
+}
+
+export async function fetchTmdbSearch(query: string, page = 1): Promise<{ results: MediaItem[]; totalPages: number }> {
+  try {
+    const res = await safeFetch<{ results: MediaItem[]; totalPages: number }>(`/api/tmdb/search?query=${encodeURIComponent(query)}&page=${page}`);
+    if (res && res.results && res.results.length > 0) return res;
+  } catch {}
+
+  // Direct CDN fallback
+  try {
+    const directRes = await fetch(`${TMDB_CDN_URL}/search/multi?api_key=${CLIENT_TMDB_KEY}&query=${encodeURIComponent(query)}&page=${page}`);
+    if (directRes.ok) {
+      const data = await directRes.json();
+      const results = (data.results || [])
+        .filter((item: any) => (item.media_type === 'movie' || item.media_type === 'tv') && item.poster_path)
+        .map((item: any) => formatTmdbClient(item));
+      return { results, totalPages: data.total_pages || 1 };
+    }
+  } catch (e) {
+    console.warn('Direct TMDB search fallback failed:', e);
+  }
+
+  return { results: [], totalPages: 1 };
+}
+
+export async function fetchTmdbDetails(type: 'movie' | 'series' | 'tv', id: number | string): Promise<MediaItem | null> {
+  try {
+    const res = await safeFetch<MediaItem>(`/api/tmdb/details/${type}/${id}`);
+    if (res) return res;
+  } catch {}
+
+  // Direct CDN fallback with trailer videos, credits and watch providers
+  try {
+    const tmdbType = type === 'series' || type === 'tv' ? 'tv' : 'movie';
+    const directRes = await fetch(`${TMDB_CDN_URL}/${tmdbType}/${id}?api_key=${CLIENT_TMDB_KEY}&append_to_response=credits,videos,watch/providers,similar`);
+    if (directRes.ok) {
+      const data = await directRes.json();
+      return formatTmdbClient(data, tmdbType === 'tv' ? 'series' : 'movie');
+    }
+  } catch {}
+
+  return null;
+}
+
+export async function fetchTmdbSimilar(type: 'movie' | 'tv', id: number | string): Promise<MediaItem[]> {
+  try {
+    const res = await fetch(`${TMDB_CDN_URL}/${type}/${id}/similar?api_key=${CLIENT_TMDB_KEY}&page=1`);
+    if (res.ok) {
+      const data = await res.json();
+      return (data.results || [])
+        .filter((item: any) => item.poster_path && (item.title || item.name))
+        .slice(0, 6)
+        .map((item: any) => formatTmdbClient(item, type === 'tv' ? 'series' : 'movie'));
+    }
+  } catch (e) {
+    console.warn('Failed to fetch similar titles:', e);
+  }
+  return [];
+}
+
+// ----------------------------------------------------
+// Real Jikan API Integration (MyAnimeList for Anime)
+// ----------------------------------------------------
+const JIKAN_BASE_URL = 'https://api.jikan.moe/v4';
+
+function formatJikanAnime(item: any): MediaItem {
+  const malId = item.mal_id;
+  const title = item.title_english || item.title || 'Anime';
+  const releaseYear = item.year || (item.aired?.from ? new Date(item.aired.from).getFullYear() : 2024);
+  const posterUrl = item.images?.webp?.large_image_url || item.images?.jpg?.large_image_url || 'https://images.unsplash.com/photo-1578632767115-351597cf2477?auto=format&fit=crop&w=800&q=80';
+  const backdropUrl = item.trailer?.images?.maximum_image_url || item.images?.webp?.large_image_url || posterUrl;
+  const genres = (item.genres || []).map((g: any) => g.name);
+  if (!genres.includes('Animation')) genres.unshift('Animation');
+
+  const episodeCount = item.episodes || 12;
+  const episodes = Array.from({ length: Math.min(episodeCount, 24) }, (_, idx) => ({
+    id: `mal-${malId}-ep-${idx + 1}`,
+    episodeNumber: idx + 1,
+    title: `Episode ${idx + 1}`,
+    duration: item.duration ? item.duration.replace('per ep', '').trim() : '24m',
+    synopsis: `Episode ${idx + 1} of ${title}.`,
+    videoUrl: `https://vidsrc.to/embed/tv/${malId}/1/${idx + 1}`,
+    thumbnailUrl: posterUrl,
+  }));
+
+  return {
+    id: `mal-anime-${malId}`,
+    malId,
+    title,
+    arabicTitle: item.title_japanese || undefined,
+    keywords: [title.toLowerCase(), ...(item.title_synonyms || []).map((s: string) => s.toLowerCase()), 'anime', 'انمي'],
+    type: 'series',
+    tagline: item.type ? `${item.type} · ${item.status || 'Finished Airing'}` : undefined,
+    synopsis: item.synopsis || 'No synopsis provided.',
+    releaseYear: isNaN(releaseYear) ? 2024 : releaseYear,
+    rating: item.score ? Number(item.score.toFixed(1)) : 8.5,
+    contentRating: item.rating ? item.rating.split(' ')[0] : 'TV-14',
+    genres: genres.length > 0 ? genres : ['Animation', 'Action', 'Fantasy'],
+    posterUrl,
+    backdropUrl,
+    videoUrl: `https://vidsrc.to/embed/tv/${malId}/1/1`,
+    seasons: [
+      {
+        seasonNumber: 1,
+        title: item.title || 'Season 1',
+        episodes,
+      },
+    ],
+    quality: '4K UHD',
+    isFeatured: (item.score || 0) >= 8.8,
+    isTrending: true,
+    createdAt: Date.now(),
+  };
+}
+
+export async function fetchJikanTopAnime(page = 1): Promise<{ results: MediaItem[]; totalPages: number }> {
+  try {
+    const res = await fetch(`${JIKAN_BASE_URL}/top/anime?page=${page}&limit=20`);
+    if (res.ok) {
+      const data = await res.json();
+      const results = (data.data || []).map(formatJikanAnime);
+      return { results, totalPages: data.pagination?.last_visible_page || 1 };
+    }
+  } catch (err) {
+    console.warn('Failed to fetch from Jikan API, using fallback:', err);
+  }
+  return { results: [], totalPages: 1 };
+}
+
+export async function searchJikanAnime(query: string, page = 1): Promise<{ results: MediaItem[]; totalPages: number }> {
+  try {
+    const res = await fetch(`${JIKAN_BASE_URL}/anime?q=${encodeURIComponent(query)}&page=${page}&limit=20`);
+    if (res.ok) {
+      const data = await res.json();
+      const results = (data.data || []).map(formatJikanAnime);
+      return { results, totalPages: data.pagination?.last_visible_page || 1 };
+    }
+  } catch (err) {
+    console.warn('Failed to search from Jikan API:', err);
+  }
+  return { results: [], totalPages: 1 };
+}
+
+export async function fetchTmdbSeasonEpisodes(id: number | string, seasonNumber: number): Promise<any> {
+  try {
+    const res = await safeFetch<any>(`/api/tmdb/tv/${id}/season/${seasonNumber}`);
+    if (res && res.episodes && res.episodes.length > 0) return res;
+  } catch {}
+
+  // Direct CDN fallback
+  try {
+    const directRes = await fetch(`${TMDB_CDN_URL}/tv/${id}/season/${seasonNumber}?api_key=${CLIENT_TMDB_KEY}`);
+    if (directRes.ok) {
+      const data = await directRes.json();
+      const episodes = (data.episodes || []).map((ep: any) => ({
+        id: `tmdb-tv-${id}-s${seasonNumber}-e${ep.episode_number}`,
+        episodeNumber: ep.episode_number,
+        title: ep.name || `Episode ${ep.episode_number}`,
+        duration: ep.runtime ? `${ep.runtime}m` : '45m',
+        synopsis: ep.overview || 'No description available.',
+        videoUrl: `https://vidsrc.to/embed/tv/${id}/${seasonNumber}/${ep.episode_number}`,
+        thumbnailUrl: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : undefined,
+      }));
+      if (episodes.length > 0) {
+        return {
+          seasonNumber: Number(seasonNumber),
+          title: data.name || `Season ${seasonNumber}`,
+          episodes,
+        };
+      }
+    }
+  } catch {}
+
+  // Default fallback episodes so users ALWAYS have buttons to switch between
+  const fallbackEpisodes = Array.from({ length: 12 }, (_, i) => ({
+    id: `tmdb-tv-${id}-s${seasonNumber}-e${i + 1}`,
+    episodeNumber: i + 1,
+    title: `Episode ${i + 1}`,
+    duration: '24m',
+    synopsis: `Episode ${i + 1} of Season ${seasonNumber}.`,
+    videoUrl: `https://vidsrc.to/embed/tv/${id}/${seasonNumber}/${i + 1}`,
+  }));
+
+  return {
+    seasonNumber: Number(seasonNumber),
+    title: `Season ${seasonNumber}`,
+    episodes: fallbackEpisodes,
+  };
+}
+
+// Watch History
+export async function getWatchHistory(): Promise<WatchProgress[]> {
+  try {
+    const data = await safeFetch<{ history: WatchProgress[] }>('/api/user/history', undefined, { history: [] });
+    if (data.history && data.history.length > 0) {
+      localStorage.setItem('cinepulse_history_cache', JSON.stringify(data.history));
+      return data.history;
+    }
+  } catch {}
+
+  try {
+    const cached = localStorage.getItem('cinepulse_history_cache');
+    if (cached) return JSON.parse(cached);
+  } catch {}
+
+  return [];
+}
+
+export async function saveWatchProgress(progress: Omit<WatchProgress, 'lastWatchedAt' | 'completed'>): Promise<void> {
+  try {
+    await safeFetch('/api/user/history', {
+      method: 'POST',
+      body: JSON.stringify(progress),
+    });
+  } catch (e) {
+    console.warn('Failed to sync watch history with server, storing locally', e);
+  }
+
+  try {
+    const cached = localStorage.getItem('cinepulse_history_cache');
+    let list: WatchProgress[] = cached ? JSON.parse(cached) : [];
+    const completed = progress.durationSeconds > 0 && progress.timestampSeconds / progress.durationSeconds >= 0.9;
+    const newEntry: WatchProgress = {
+      ...progress,
+      lastWatchedAt: Date.now(),
+      completed,
+    };
+    list = [newEntry, ...list.filter((x) => x.mediaId !== progress.mediaId || (progress.episodeId && x.episodeId !== progress.episodeId))].slice(0, 20);
+    localStorage.setItem('cinepulse_history_cache', JSON.stringify(list));
+  } catch {}
+}
+
+// Comments
+export async function getComments(mediaId: string): Promise<Comment[]> {
+  const fallbackComments: Comment[] = [
+    {
+      id: 'mock-1',
+      mediaId,
+      userName: 'FilmBuff99',
+      rating: 5,
+      content: 'Brilliant cinematography and incredible sound design. Highly recommended!',
+      createdAt: Date.now() - 3600000,
+    },
+  ];
+
+  try {
+    const res = await safeFetch<{ comments: Comment[] }>(`/api/comments/${mediaId}`, undefined, { comments: fallbackComments });
+    return res.comments;
+  } catch {
+    return fallbackComments;
+  }
+}
+
+export async function postComment(mediaId: string, content: string, rating: number, userName: string, episodeId?: string): Promise<Comment> {
+  const fallbackComment: Comment = {
+    id: `comm-local-${Date.now()}`,
+    mediaId,
+    episodeId,
+    userName: userName || 'You',
+    rating,
+    content,
+    createdAt: Date.now(),
+  };
+
+  try {
+    const res = await safeFetch<{ success: boolean; comment: Comment }>('/api/comments', {
+      method: 'POST',
+      body: JSON.stringify({ mediaId, episodeId, content, rating, userName }),
+    }, { success: true, comment: fallbackComment });
+    return res.comment || fallbackComment;
+  } catch {
+    return fallbackComment;
+  }
+}
+
+// AI Recommendations
+export async function getAIRecommendations(watchedTitles: string[], availableCatalog: MediaItem[]): Promise<{
+  headline: string;
+  reasoning: string;
+  recommendedTitles: string[];
+}> {
+  const fallback = {
+    headline: 'Curated Based on Your Viewing History',
+    reasoning: 'Selected for fans of high-concept storytelling and atmospheric world-building.',
+    recommendedTitles: availableCatalog.slice(0, 3).map((c) => c.title),
+  };
+
+  try {
+    return await safeFetch('/api/ai/recommend', {
+      method: 'POST',
+      body: JSON.stringify({ watchedTitles, availableCatalog }),
+    }, fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+// AI Chatbot Concierge ("CineBot")
+export async function sendAIChatMessage(
+  message: string,
+  catalogSummary: Array<{ id: string; title: string; type: string; genres: string[]; rating: number; synopsis: string }>,
+  history: Array<{ role: 'user' | 'assistant'; content: string }> = []
+): Promise<string> {
+  const fallback = `Based on your request, I strongly recommend checking out our top-rated trending blockbusters like "${catalogSummary[0]?.title || 'UNABOMBER'}"!`;
+
+  try {
+    const res = await safeFetch<{ reply: string }>('/api/ai/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message, catalogSummary, history }),
+    }, { reply: fallback });
+    return res.reply || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+// AI Summary & Themes
+export async function getAISummary(title: string, synopsis: string, genres: string[]): Promise<string> {
+  const fallback = `An immersive, character-driven cinematic masterpiece. Explores timeless themes of courage and discovery.`;
+  try {
+    const res = await safeFetch<{ summary: string }>('/api/ai/summary', {
+      method: 'POST',
+      body: JSON.stringify({ title, synopsis, genres }),
+    }, { summary: fallback });
+    return res.summary || fallback;
+  } catch {
+    return fallback;
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "CinePulse - Movies, Series & Streaming Network",
+  "description": "Stream movies, TV series, and anime with responsive 4K player, quick episode selector, and real TMDB catalog.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
